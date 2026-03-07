@@ -14,7 +14,7 @@ import wandb
 from openai import OpenAI
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_ID = "meta-llama/Llama-3.2-1B"
 
 # Python binary inside vLLM's isolated venv
 VLLM_PYTHON = os.path.expanduser("~/.local/share/vllm-venv/bin/python")
@@ -114,19 +114,21 @@ class TransformersBackend(Backend):
         self.model.generation_config.max_length = None
 
     def generate_batch(self, prompt_text: str, batch_size: int, max_new_tokens: int) -> dict:
-        inputs = self.tokenizer(prompt_text, return_tensors="pt").input_ids
-        inputs = inputs.repeat(batch_size, 1).to("cuda")
+        enc = self.tokenizer(prompt_text, return_tensors="pt")
+        input_ids = enc.input_ids.repeat(batch_size, 1).to("cuda")
+        attention_mask = enc.attention_mask.repeat(batch_size, 1).to("cuda")
+        gen_kwargs = dict(attention_mask=attention_mask, pad_token_id=self.tokenizer.eos_token_id, do_sample=False)
 
         for _ in range(WARMUP_RUNS):
             with torch.no_grad():
-                self.model.generate(inputs, max_new_tokens=10, do_sample=False)
+                self.model.generate(input_ids, max_new_tokens=10, **gen_kwargs)
         torch.cuda.synchronize()
 
         # TTFT
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         with torch.no_grad():
-            self.model.generate(inputs, max_new_tokens=1, do_sample=False)
+            self.model.generate(input_ids, max_new_tokens=1, **gen_kwargs)
         torch.cuda.synchronize()
         ttft_ms = (time.perf_counter() - t0) * 1000
 
@@ -136,12 +138,12 @@ class TransformersBackend(Backend):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         with torch.no_grad():
-            outputs = self.model.generate(inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            outputs = self.model.generate(input_ids, max_new_tokens=max_new_tokens, **gen_kwargs)
         torch.cuda.synchronize()
         total_s = time.perf_counter() - t0
         vram_peak_gb = monitor.stop()
 
-        total_tokens = (outputs.shape[1] - inputs.shape[1]) * batch_size
+        total_tokens = (outputs.shape[1] - input_ids.shape[1]) * batch_size
         tpot_ms = ((total_s * 1000) - ttft_ms) / max(total_tokens - batch_size, 1)
         tokens_per_sec = total_tokens / total_s
 
@@ -164,7 +166,7 @@ class ServerBackend(Backend):
         self._proc = subprocess.Popen(self._launch_cmd)
         self._wait_ready()
 
-    def _wait_ready(self, timeout_s: int = 180):
+    def _wait_ready(self, timeout_s: int = 360):
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             try:
@@ -243,8 +245,9 @@ class VLLMBackend(ServerBackend):
                 "--model", MODEL_ID,
                 "--host", "0.0.0.0",
                 "--port", "30001",
-                "--gpu-memory-utilization", "0.55",
-                "--max-model-len", "512",
+                "--gpu-memory-utilization", "0.50",
+                "--max-model-len", "1024",
+                "--max-num-seqs", "32",
                 "--enforce-eager",
             ],
         )
@@ -252,7 +255,7 @@ class VLLMBackend(ServerBackend):
 
 # ── Benchmark harness ─────────────────────────────────────────────────────────
 def run_benchmark(backend: Backend, tokenizer: AutoTokenizer, os_idle_gb: float, result_queue=None):
-    wandb.init(project="osso", name=f"benchmark-{backend.name}-tinyllama", reinit=True)
+    wandb.init(project="osso", name=f"benchmark-{backend.name}-llama3.2-1b", reinit=True)
 
     backend.setup()
     model_loaded_gb = sample_vram_baseline(duration_s=3.0)
