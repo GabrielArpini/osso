@@ -13,8 +13,8 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(size))
 
     def forward(self, x):
-        rms = torch.sqrt(torch.sum(torch.pow(x, 2)) / self.size + self.eps)
-        return (x / rms) * self.weight
+        rms = torch.rsqrt(torch.mean(torch.pow(x, 2), dim=-1, keepdim=True) + self.eps)
+        return x * rms * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 500000.0) -> torch.Tensor:
