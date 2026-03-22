@@ -1,7 +1,8 @@
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
 from einops import rearrange
 
 
@@ -23,18 +24,20 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 500000.0) -> torch.T
     freqs = torch.outer(t, freqs)
     return torch.polar(torch.ones_like(freqs), freqs)
 
+
 # Re implementation of original llama rope, but with einops from: https://github.com/meta-llama/llama/pull/1173
-def RoPE(
-        xq: torch.Tensor,
-        xk: torch.Tensor,
-        freqs_cis: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(rearrange(xq.float(), '... (c d) -> ... c d', d=2))
-    xk_ = torch.view_as_complex(rearrange(xk.float(), '... (c d) -> ... c d', d=2))
-    freqs_cis = rearrange(freqs_cis, 's d -> 1 s 1 d')
-    xq_out = rearrange(torch.view_as_real(xq_ * freqs_cis), '... c d -> ... (c d)')
-    xk_out = rearrange(torch.view_as_real(xk_ * freqs_cis), '... c d -> ... (c d)')
+def apply_rope(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(rearrange(xq.float(), "... (c d) -> ... c d", d=2))
+    xk_ = torch.view_as_complex(rearrange(xk.float(), "... (c d) -> ... c d", d=2))
+    freqs_cis = rearrange(freqs_cis, "s d -> 1 s 1 d")
+    xq_out = rearrange(torch.view_as_real(xq_ * freqs_cis), "... c d -> ... (c d)")
+    xk_out = rearrange(torch.view_as_real(xk_ * freqs_cis), "... c d -> ... (c d)")
     return xq_out.type_as(xq), xk_out.type_as(xk)
+
 
 class SwiGLU(nn.Module):
     def __init__(self, dim: int, ffn_dim: int):

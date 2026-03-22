@@ -1,5 +1,9 @@
 [project]
 name = "osso"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["osso*"]
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

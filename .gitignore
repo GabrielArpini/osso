@@ -211,3 +211,5 @@ wandb/
 
 # Profiler traces
 *.json
+.planning/
+memory/
