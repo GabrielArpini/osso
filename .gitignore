@@ -213,3 +213,4 @@ wandb/
 *.json
 .planning/
 memory/
+.claude/
