@@ -12,13 +12,16 @@ import torch
 import weave
 import wandb
 from openai import OpenAI
+from osso.config import SamplingParams
+from osso.engine.engine import Engine
+from osso.engine.generate import generate
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_ID = "meta-llama/Llama-3.2-1B"
 
 # Python binary inside vLLM's isolated venv
 VLLM_PYTHON = os.path.expanduser("~/.local/share/vllm-venv/bin/python")
-BATCH_SIZES = [1, 2, 4, 8]
+BATCH_SIZES = [1, 2, 4]
 PROMPT_LENGTHS = [64, 128, 256]
 MAX_NEW_TOKENS = 100
 WARMUP_RUNS = 2
@@ -138,7 +141,7 @@ class TransformersBackend(Backend):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         with torch.no_grad():
-            outputs = self.model.generate(input_ids, max_new_tokens=max_new_tokens, **gen_kwargs)
+            outputs = self.model.generate(input_ids, max_new_tokens=max_new_tokens, min_new_tokens=max_new_tokens, **gen_kwargs)
         torch.cuda.synchronize()
         total_s = time.perf_counter() - t0
         vram_peak_gb = monitor.stop()
@@ -151,6 +154,51 @@ class TransformersBackend(Backend):
 
     def teardown(self):
         del self.model
+        torch.cuda.empty_cache()
+
+
+# ── Osso ──────────────────────────────────────────────────────────────────────
+class OssoBackend(Backend):
+    name = "osso"
+
+    def setup(self):
+        self.engine = Engine(MODEL_ID)
+
+    def generate_batch(self, prompt_text: str, batch_size: int, max_new_tokens: int) -> dict:
+        params = SamplingParams(max_new_tokens=max_new_tokens)
+
+        for _ in range(WARMUP_RUNS):
+            generate(self.engine, prompt_text, SamplingParams(max_new_tokens=10))
+        torch.cuda.synchronize()
+
+        input_ids = self.engine.tokenizer.encode(prompt_text, return_tensors="pt").to(self.engine.device)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.inference_mode():
+            self.engine.model(input_ids)
+        torch.cuda.synchronize()
+        ttft_ms = (time.perf_counter() - t0) * 1000
+
+        monitor = VramMonitor()
+        monitor.start()
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        total_tokens = 0
+        for _ in range(batch_size):
+            output = generate(self.engine, prompt_text, params)
+            output_ids = self.engine.tokenizer.encode(output)
+            total_tokens += max(len(output_ids) - len(input_ids[0]), 1)
+        torch.cuda.synchronize()
+        total_s = time.perf_counter() - t0
+        vram_peak_gb = monitor.stop()
+
+        tpot_ms = ((total_s * 1000) - ttft_ms) / max(total_tokens - batch_size, 1)
+        tokens_per_sec = total_tokens / total_s
+
+        return dict(ttft_ms=ttft_ms, tpot_ms=tpot_ms, tokens_per_sec=tokens_per_sec, vram_peak_gb=vram_peak_gb)
+
+    def teardown(self):
+        del self.engine.model
         torch.cuda.empty_cache()
 
 
@@ -185,6 +233,7 @@ class ServerBackend(Backend):
             max_tokens=max_tokens,
             stream=True,
             temperature=0,
+            extra_body={"ignore_eos": True},
         )
         first_token_t = None
         token_count = 0
@@ -295,6 +344,7 @@ def _run_backend_process(backend_name: str, os_idle_gb: float, result_queue):
     backend = {
         "transformers": TransformersBackend,
         "vllm": VLLMBackend,
+        "osso": OssoBackend,
     }[backend_name]()
     run_benchmark(backend, tokenizer, os_idle_gb, result_queue)
 
@@ -304,44 +354,42 @@ def _print_summary(all_results: dict):
     if len(backends) < 2:
         return
 
-    b0, b1 = backends[0], backends[1]
-    data0 = {(bs, pl): m for bs, pl, m in all_results[b0]}
-    data1 = {(bs, pl): m for bs, pl, m in all_results[b1]}
-    keys = sorted(set(data0) & set(data1))
-
     lw, cw = 20, 16
+    n = len(backends)
+    sep = "┬" + "┬".join(f"{'─'*(cw+2)}" for _ in backends)
 
-    top    = f"┌{'─'*(lw+2)}┬{'─'*(cw+2)}┬{'─'*(cw+2)}┐"
-    head   = f"│ {'BENCHMARK SUMMARY':<{lw}} │ {b0:^{cw}} │ {b1:^{cw}} │"
-    mid    = f"├{'─'*(lw+2)}┼{'─'*(cw+2)}┼{'─'*(cw+2)}┤"
-    bot    = f"└{'─'*(lw+2)}┴{'─'*(cw+2)}┴{'─'*(cw+2)}┘"
+    top  = f"┌{'─'*(lw+2)}" + "┬" + "┬".join(f"{'─'*(cw+2)}" for _ in backends) + "┐"
+    head = f"│ {'BENCHMARK SUMMARY':<{lw}} │" + "│".join(f" {b:^{cw}} " for b in backends) + "│"
+    mid  = f"├{'─'*(lw+2)}" + "┼" + "┼".join(f"{'─'*(cw+2)}" for _ in backends) + "┤"
+    bot  = f"└{'─'*(lw+2)}" + "┴" + "┴".join(f"{'─'*(cw+2)}" for _ in backends) + "┘"
 
-    def row(label, v0, v1):
-        return f"│ {label:<{lw}} │ {v0:>{cw}} │ {v1:>{cw}} │"
-
-    span_w = lw + 2 + 1 + cw + 2 + 1 + cw + 2
+    span_w = lw + 2 + sum(cw + 3 for _ in backends)
     def span(label):
         return f"│ {label:<{span_w - 2}} │"
+
+    def row(label, vals):
+        return f"│ {label:<{lw}} │" + "│".join(f" {v:>{cw}} " for v in vals) + "│"
+
+    data = {b: {(bs, pl): m for bs, pl, m in all_results[b]} for b in backends}
+    keys = sorted(set.intersection(*[set(data[b].keys()) for b in backends]))
 
     print()
     print(top)
     print(head)
 
     for bs, pl in keys:
-        m0, m1 = data0[(bs, pl)], data1[(bs, pl)]
+        ms = [data[b][(bs, pl)] for b in backends]
         print(mid)
         print(span(f"bs={bs}  prompt={pl}"))
         print(mid)
-        print(row("  ttft (ms)",    f"{m0['ttft_ms']:.1f}",        f"{m1['ttft_ms']:.1f}"))
+        print(row("  ttft (ms)",  [f"{m['ttft_ms']:.1f}"        for m in ms]))
         print(mid)
-        print(row("  tpot (ms)",    f"{m0['tpot_ms']:.2f}",        f"{m1['tpot_ms']:.2f}"))
+        print(row("  tpot (ms)",  [f"{m['tpot_ms']:.2f}"        for m in ms]))
         print(mid)
-        print(row("  tok/s",        f"{m0['tokens_per_sec']:.1f}", f"{m1['tokens_per_sec']:.1f}"))
+        print(row("  tok/s",      [f"{m['tokens_per_sec']:.1f}" for m in ms]))
 
-    vram0 = all_results[b0][0][2]["model_vram_gb"]
-    vram1 = all_results[b1][0][2]["model_vram_gb"]
     print(mid)
-    print(row("model vram (GB)", f"{vram0:.2f}", f"{vram1:.2f}"))
+    print(row("model vram (GB)", [f"{all_results[b][0][2]['model_vram_gb']:.2f}" for b in backends]))
     print(bot)
 
 
@@ -355,7 +403,7 @@ if __name__ == "__main__":
     result_queue = multiprocessing.Queue()
     all_results = {}
 
-    for backend_name in ["transformers", "vllm"]:
+    for backend_name in ["transformers", "vllm", "osso"]:
         p = multiprocessing.Process(target=_run_backend_process, args=(backend_name, os_idle_gb, result_queue))
         p.start()
         p.join()
