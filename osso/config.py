@@ -10,6 +10,15 @@ class RoPEConfig:
     theta: float
 
 
+@dataclass
+class SamplingParams:
+    temperature: float = 0.1
+    top_k: int = 5
+    top_p: float = 0.65
+    max_new_tokens: int = 200
+    repetition_penalty: float = 1.0
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     n_layers: int
