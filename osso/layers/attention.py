@@ -1,11 +1,9 @@
-from dataclasses import asdict
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import ModelConfig
+from osso.config import ModelConfig
 from einops import rearrange
-from utils import RMSNorm, apply_rope, precompute_freqs_cis
+from osso.layers.utils import RMSNorm, apply_rope
 
 
 # Repeat kv from official llama repo.
@@ -35,9 +33,8 @@ class Attention(nn.Module):
         self.k_norm = k_norm
         self.wqkv = nn.Linear(config.hidden_size, (self.num_qo_heads + 2 * self.num_kv_heads) * config.head_dim, bias=False)
         self.wo = nn.Linear(self.num_qo_heads * config.head_dim, config.hidden_size, bias=False)
-        self.freqs_cis = precompute_freqs_cis(**asdict(config.rotary_config))
 
-    def forward(self, x):
+    def forward(self, x, freqs_cis):
         _, seqlen, _ = x.shape
         qkv = self.wqkv(x)
         q, k, v = qkv.split(
@@ -51,7 +48,7 @@ class Attention(nn.Module):
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
-        q, k = apply_rope(q, k, self.freqs_cis[:seqlen])
+        q, k = apply_rope(q, k, freqs_cis)
         k = repeat_kv(k, self.n_rep)
         v = repeat_kv(v, self.n_rep)
         q = rearrange(q, "b s h d -> b h s d")

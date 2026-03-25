@@ -1,7 +1,9 @@
+from dataclasses import asdict
+
 import torch
-from config import ModelConfig
-from layers.attention import Attention
-from layers.utils import RMSNorm, SwiGLU
+from osso.config import ModelConfig
+from osso.layers.attention import Attention
+from osso.layers.utils import RMSNorm, SwiGLU, precompute_freqs_cis
 from torch import nn
 
 
@@ -11,8 +13,8 @@ class LlamaAttention(nn.Module):
         self.attn = Attention(config)
         self.norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
 
-    def forward(self, x):
-        return x + self.attn(self.norm(x))
+    def forward(self, x, freqs_cis):
+        return x + self.attn(self.norm(x), freqs_cis)
 
 
 class TransformerBlock(nn.Module):
@@ -22,8 +24,8 @@ class TransformerBlock(nn.Module):
         self.feed_forward = SwiGLU(config.hidden_size, config.ffn_dim)
         self.ffn_norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
 
-    def forward(self, x):
-        h = self.attention(x)
+    def forward(self, x, freqs_cis):
+        h = self.attention(x, freqs_cis)
         return h + self.feed_forward(self.ffn_norm(h))
 
 
@@ -36,11 +38,14 @@ class LlamaModel(nn.Module):
         )
         self.norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
         self.output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.register_buffer("freqs_cis", precompute_freqs_cis(**asdict(config.rotary_config)), persistent=False)
 
     def forward(self, tokens):
         x = self.tok_embeddings(tokens)
+        seqlen = x.shape[1]
+        freqs_cis = self.freqs_cis[:seqlen]
         for block in self.blocks:
-            x = block(x)
+            x = block(x, freqs_cis)
         return self.output(self.norm(x))
 
 
@@ -48,7 +53,10 @@ def remap_weights(state_dict: dict, config: ModelConfig) -> dict:
     new_sd = {}
     new_sd["tok_embeddings.weight"] = state_dict["model.embed_tokens.weight"]
     new_sd["norm.weight"] = state_dict["model.norm.weight"]
-    new_sd["output.weight"] = state_dict["lm_head.weight"]
+    if "lm_head.weight" in state_dict:
+        new_sd["output.weight"] = state_dict["lm_head.weight"]
+    else:
+        new_sd["output.weight"] = state_dict["model.embed_tokens.weight"]
 
     for i in range(config.n_layers):
         hf = f"model.layers.{i}"
