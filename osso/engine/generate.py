@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from osso.config import SamplingParams
+from osso.kvcache.naive import NaiveKVCache
 
 
 def apply_repetition_penalty(logits: torch.Tensor, generated: torch.Tensor, penalty: float) -> torch.Tensor:
@@ -36,9 +37,22 @@ def generate(engine, prompt: str, params: SamplingParams | None = None) -> str:
 
     input_ids = engine.tokenizer.encode(prompt, return_tensors="pt").to(engine.device)
     generated = input_ids
+    kv_cache = NaiveKVCache(engine.config, engine.device, engine.dtype)
 
-    for _ in range(params.max_new_tokens):
-        logits = engine.model(generated)
+    # prefill: process entire prompt, cache all K/V
+    logits = engine.model(input_ids, kv_cache)
+    next_logits = logits[:, -1, :]
+    if params.repetition_penalty != 1.0:
+        next_logits = apply_repetition_penalty(next_logits, generated, params.repetition_penalty)
+    next_token = sample(next_logits, params.temperature, params.top_k, params.top_p)
+    generated = torch.cat([generated, next_token], dim=1)
+
+    if next_token.item() == engine.tokenizer.eos_token_id:
+        return engine.tokenizer.decode(generated[0], skip_special_tokens=True)
+
+    # decode: one token at a time, reusing cached K/V
+    for _ in range(params.max_new_tokens - 1):
+        logits = engine.model(next_token, kv_cache)
         next_logits = logits[:, -1, :]
         if params.repetition_penalty != 1.0:
             next_logits = apply_repetition_penalty(next_logits, generated, params.repetition_penalty)

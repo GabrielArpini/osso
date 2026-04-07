@@ -21,6 +21,8 @@ class SamplingParams:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    max_seq_len: int
+    batch_size: int
     n_layers: int
     head_dim: int
     vocab_size: int

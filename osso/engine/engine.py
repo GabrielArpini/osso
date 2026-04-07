@@ -10,6 +10,8 @@ from osso.utils.hf import cached_load_hf_config, download_hf_weight, load_tokeni
 def load_model_config(model_path: str) -> ModelConfig:
     hf_cfg = cached_load_hf_config(model_path)
     return ModelConfig(
+        max_seq_len=hf_cfg.max_position_embeddings,
+        batch_size=1,
         n_layers=hf_cfg.num_hidden_layers,
         hidden_size=hf_cfg.hidden_size,
         head_dim=hf_cfg.head_dim,
@@ -40,12 +42,12 @@ class Engine:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-        config = load_model_config(model_path)
+        self.config = load_model_config(model_path)
         weights_dir = download_hf_weight(model_path)
         state_dict = load_weights(weights_dir)
-        state_dict = remap_weights(state_dict, config)
+        state_dict = remap_weights(state_dict, self.config)
 
-        self.model = LlamaModel(config)
+        self.model = LlamaModel(self.config)
         self.model.load_state_dict(state_dict)
         self.model.to(self.device, self.dtype)
         self.model.eval()
