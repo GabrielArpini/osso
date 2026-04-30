@@ -8,6 +8,7 @@ dependencies = [
     "accelerate>=1.13.0",
     "annotated-types>=0.7.0",
     "cachetools>=7.0.5",
+    "datasets>=4.8.5",
     "diskcache>=5.6.3",
     "einops>=0.8.2",
     "gql>=4.0.0",
