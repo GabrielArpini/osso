@@ -4,8 +4,7 @@ import torch.nn.functional as F
 from osso.config import ModelConfig
 from osso.kvcache.base import BaseKVCache
 from einops import rearrange
-from osso.layers.utils import RMSNorm, apply_rope
-
+from osso.layers.utils import RMSNorm, apply_rotary_pos_emb
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
@@ -34,7 +33,7 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(config.hidden_size, (self.num_qo_heads + 2 * self.num_kv_heads) * config.head_dim, bias=False)
         self.wo = nn.Linear(self.num_qo_heads * config.head_dim, config.hidden_size, bias=False)
 
-    def forward(self, x, freqs_cis, layer_id: int = 0, kv_cache: BaseKVCache | None = None):
+    def forward(self, x, layer_id: int = 0, kv_cache: BaseKVCache | None = None, position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None):
         _, seqlen, _ = x.shape
         qkv = self.wqkv(x)
         q, k, v = qkv.split(
@@ -44,11 +43,14 @@ class Attention(nn.Module):
         q = rearrange(q, "b s (h d) -> b s h d", h=self.num_qo_heads)
         k = rearrange(k, "b s (h d) -> b s h d", h=self.num_kv_heads)
         v = rearrange(v, "b s (h d) -> b s h d", h=self.num_kv_heads)
+
+        cos, sin = position_embeddings
+
         if self.q_norm is not None:
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
-        q, k = apply_rope(q, k, freqs_cis)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         if kv_cache is not None:
             start_pos = kv_cache.seq_len

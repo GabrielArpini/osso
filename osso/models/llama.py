@@ -4,7 +4,7 @@ import torch
 from osso.config import ModelConfig
 from osso.kvcache.base import BaseKVCache
 from osso.layers.attention import Attention
-from osso.layers.utils import RMSNorm, SwiGLU, precompute_freqs_cis
+from osso.layers.utils import RMSNorm, SwiGLU, precompute_cos_sin
 from torch import nn
 
 
@@ -14,8 +14,8 @@ class LlamaAttention(nn.Module):
         self.attn = Attention(config)
         self.norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
 
-    def forward(self, x, freqs_cis, layer_id: int = 0, kv_cache: BaseKVCache | None = None):
-        return x + self.attn(self.norm(x), freqs_cis, layer_id, kv_cache)
+    def forward(self, x, layer_id: int = 0, kv_cache: BaseKVCache | None = None, position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None):
+        return x + self.attn(self.norm(x), layer_id, kv_cache, position_embeddings)
 
 
 class TransformerBlock(nn.Module):
@@ -25,8 +25,8 @@ class TransformerBlock(nn.Module):
         self.feed_forward = SwiGLU(config.hidden_size, config.ffn_dim)
         self.ffn_norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
 
-    def forward(self, x, freqs_cis, layer_id: int = 0, kv_cache: BaseKVCache | None = None):
-        h = self.attention(x, freqs_cis, layer_id, kv_cache)
+    def forward(self, x, layer_id: int = 0, kv_cache: BaseKVCache | None = None, position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None):
+        h = self.attention(x, layer_id, kv_cache, position_embeddings)
         return h + self.feed_forward(self.ffn_norm(h))
 
 
@@ -39,15 +39,20 @@ class LlamaModel(nn.Module):
         )
         self.norm = RMSNorm(config.rms_norm_eps, config.hidden_size)
         self.output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.register_buffer("freqs_cis", precompute_freqs_cis(**asdict(config.rotary_config)), persistent=False)
+        cos, sin = precompute_cos_sin(**asdict(config.rotary_config))
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
     def forward(self, tokens, kv_cache: BaseKVCache | None = None):
         x = self.tok_embeddings(tokens)
         start_pos = kv_cache.seq_len if kv_cache is not None else 0
         seqlen = x.shape[1]
-        freqs_cis = self.freqs_cis[start_pos:start_pos + seqlen]
+        position_embeddings = (
+            self.cos[start_pos:start_pos + seqlen],
+            self.sin[start_pos:start_pos + seqlen],
+        )
         for layer_id, block in enumerate(self.blocks):
-            x = block(x, freqs_cis, layer_id, kv_cache)
+            x = block(x, layer_id, kv_cache, position_embeddings)
         return self.output(self.norm(x))
 
 
