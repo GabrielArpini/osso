@@ -40,7 +40,11 @@ class Engine:
     def __init__(self, model_path: str):
         self.tokenizer = load_tokenizer(model_path)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        if torch.cuda.is_available():
+            major, _ = torch.cuda.get_device_capability()
+            self.dtype = torch.bfloat16 if major >= 8 else torch.float16
+        else:
+            self.dtype = torch.float32
 
         self.config = load_model_config(model_path)
         weights_dir = download_hf_weight(model_path)
