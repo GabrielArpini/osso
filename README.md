@@ -4,7 +4,7 @@ A general-purpose LLM inference engine with online and offline serving, built fo
 
 Most inference engines are designed around datacenter hardware — 80GB VRAM, multi-GPU clusters, high-end Ampere and Hopper architectures. osso takes the opposite approach: a single consumer GPU with tight memory constraints, where every byte of KV cache and every memory access pattern actually matters. The kind of hardware most people actually have.
 
-The engine targets Turing (SM75 / RTX 20xx) as its primary architecture, a generation that existing optimized kernels like FlashAttention largely ignore. Everything from the attention kernel to the KV cache is designed around the realities of running on 6GB of VRAM — not as a limitation, but as the actual design constraint.
+The engine targets Turing (SM75 / RTX 20xx) as its primary architecture, a generation that existing optimized kernels like FlashAttention largely ignore. Everything from the attention kernel to the KV cache is designed around the realities of running on 6GB of VRAM,not as a limitation, but as the actual design constraint.
 
 ## References
 
