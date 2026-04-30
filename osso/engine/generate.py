@@ -37,10 +37,12 @@ def generate(engine, prompt: str, params: SamplingParams | None = None) -> str:
 
     input_ids = engine.tokenizer.encode(prompt, return_tensors="pt").to(engine.device)
     generated = input_ids
-    kv_cache = NaiveKVCache(engine.config, engine.device, engine.dtype)
+    needed_seq_len = input_ids.shape[1] + params.max_new_tokens
+    kv_cache = NaiveKVCache(engine.config, engine.device, engine.dtype, max_seq_len=needed_seq_len)
 
     # prefill: process entire prompt, cache all K/V
     logits = engine.model(input_ids, kv_cache)
+    kv_cache.advance(input_ids.shape[1])
     next_logits = logits[:, -1, :]
     if params.repetition_penalty != 1.0:
         next_logits = apply_repetition_penalty(next_logits, generated, params.repetition_penalty)
@@ -53,6 +55,7 @@ def generate(engine, prompt: str, params: SamplingParams | None = None) -> str:
     # decode: one token at a time, reusing cached K/V
     for _ in range(params.max_new_tokens - 1):
         logits = engine.model(next_token, kv_cache)
+        kv_cache.advance(1)
         next_logits = logits[:, -1, :]
         if params.repetition_penalty != 1.0:
             next_logits = apply_repetition_penalty(next_logits, generated, params.repetition_penalty)
